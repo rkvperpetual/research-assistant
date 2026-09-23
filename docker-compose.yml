@@ -1,0 +1,42 @@
+services:
+  # ── Qdrant vector store ─────────────────────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:v1.11.0
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:
+      QDRANT__SERVICE__GRPC_PORT: "6334"
+    restart: unless-stopped
+    healthcheck:
+      # qdrant/qdrant image has bash but no curl/wget — probe TCP port 6333 directly
+      test: [ "CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333' 2>/dev/null && exit 0 || exit 1" ]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  # ── Research Assistant API ──────────────────────────────────────────────────
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # Override for docker-compose networking
+      QDRANT_URL: http://qdrant:6333
+      # SQLite conversation DB — write to the mounted data volume
+      DATA_DIR: /app/data
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    volumes:
+      # Mount sample docs so scripts/seed_kb.py can access them
+      - ./data:/app/data
+    restart: unless-stopped
+
+volumes:
+  qdrant_data:

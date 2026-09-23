@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Multi-Step Research Assistant</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; max-width: 820px; margin: 40px auto; padding: 0 16px; background: #fff; color: #111; line-height: 1.5; }
+    h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: 4px; }
+    .subtitle { color: #555; font-size: 0.85rem; margin-bottom: 24px; }
+    hr { border: none; border-top: 1px solid #ddd; margin: 20px 0; }
+    section { margin-bottom: 20px; }
+    label { font-weight: 600; display: block; margin-bottom: 6px; }
+    input[type=file] { font-size: 0.9rem; }
+    button { padding: 7px 18px; background: #1a56db; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 0.9rem; }
+    button:hover { background: #1648c1; }
+    button:disabled { background: #999; cursor: not-allowed; }
+    #file-list { margin-top: 10px; font-size: 0.85rem; }
+    .file-item { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 4px 8px; padding: 8px 0; }
+    .status-icon { width: 16px; text-align: center; }
+    .upload-detail { grid-column: 2; color: #555; font-size: 0.8rem; }
+    .progress-track { grid-column: 2; height: 7px; background: #e5e7eb; border-radius: 4px; overflow: hidden; }
+    .progress-bar { height: 100%; width: 0; background: #1a56db; transition: width .25s ease; }
+    .file-item.failed .progress-bar { background: #c0392b; }
+    textarea { width: 100%; height: 90px; padding: 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 0.95rem; resize: vertical; }
+    .ask-row { display: flex; gap: 10px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+    .ask-row label { font-weight: normal; display: flex; align-items: center; gap: 4px; cursor: pointer; }
+    #answer-box { margin-top: 16px; }
+    #answer-text { white-space: pre-wrap; border: 1px solid #e0e0e0; border-radius: 4px; padding: 14px; background: #fafafa; font-size: 0.92rem; min-height: 60px; }
+    #citations-list { margin-top: 12px; padding-left: 20px; font-size: 0.86rem; }
+    #citations-list li { margin-bottom: 4px; }
+    details { margin-top: 12px; }
+    summary { cursor: pointer; font-weight: 600; color: #444; font-size: 0.88rem; }
+    #trace-table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 0.82rem; }
+    #trace-table th, #trace-table td { border: 1px solid #e0e0e0; padding: 5px 8px; text-align: left; }
+    #trace-table th { background: #f5f5f5; }
+    #error-msg { color: #c0392b; font-size: 0.9rem; margin-top: 10px; font-weight: 600; }
+    .badge { font-size: 0.74rem; padding: 2px 7px; border-radius: 10px; background: #e8f0fe; color: #1a56db; font-weight: 600; }
+    .badge.web { background: #fef3e2; color: #b45309; }
+    a { color: #1a56db; }
+    #new-conv { font-size: 0.82rem; margin-left: 12px; }
+  </style>
+</head>
+<body>
+  <h1>🔍 Multi-Step Research Assistant</h1>
+  <p class="subtitle">
+    Powered by NVIDIA Nemotron via OpenRouter · LangGraph agent · Hybrid RAG
+    &nbsp;|&nbsp; <a href="/docs" target="_blank">/docs (Swagger)</a>
+    &nbsp;|&nbsp; <span style="color:#b45309">⚠ First request on free tier may take ~50 s (cold start)</span>
+  </p>
+
+  <hr />
+
+  <!-- ── Upload section ──────────────────────────────────────── -->
+  <section id="upload-section">
+    <label for="file-input">📂 Upload documents (PDF, DOCX, HTML, TXT, MD, PNG, JPG…)</label>
+    <input type="file" id="file-input" multiple accept=".pdf,.docx,.html,.htm,.txt,.md,.png,.jpg,.jpeg,.tiff,.csv,.xlsx" />
+    <div class="ask-row" style="margin-top:10px">
+      <button id="upload-btn" onclick="uploadFiles()">Upload</button>
+      <span style="font-size:0.85rem;color:#555">or</span>
+      <input type="text" id="url-input" placeholder="https://… (ingest a web page)" style="flex:1;padding:6px 10px;border:1px solid #ccc;border-radius:4px;font-size:0.88rem" />
+      <button onclick="ingestUrl()">Ingest URL</button>
+    </div>
+    <div id="file-list"></div>
+  </section>
+
+  <hr />
+
+  <!-- ── Ask section ─────────────────────────────────────────── -->
+  <section>
+    <label for="question-input">💬 Ask a question</label>
+    <textarea id="question-input" placeholder="e.g. Compare how the EU AI Act and NIST RMF handle risk classification…"></textarea>
+    <div class="ask-row">
+      <button id="ask-btn" onclick="askQuestion()">Ask</button>
+      <label><input type="checkbox" id="show-trace" checked /> Show reasoning trace</label>
+      <a href="#" id="new-conv" onclick="newConversation(); return false;">New conversation</a>
+      <span id="conv-badge" style="font-size:0.8rem;color:#888"></span>
+    </div>
+    <div id="error-msg"></div>
+  </section>
+
+  <!-- ── Answer section ──────────────────────────────────────── -->
+  <section id="answer-box" style="display:none">
+    <hr />
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+      <strong>Answer</strong>
+      <span id="route-badge" class="badge"></span>
+      <span id="web-badge" class="badge web" style="display:none">🌐 Web search used</span>
+      <span id="conf-badge" class="badge" style="background:#e6f4ea;color:#1e7e34"></span>
+      <span style="font-size:0.8rem;color:#888" id="latency-label"></span>
+    </div>
+    <div id="answer-text"></div>
+    <ol id="citations-list"></ol>
+    <details id="trace-details">
+      <summary id="trace-summary">▸ Reasoning trace</summary>
+      <table id="trace-table">
+        <thead><tr><th>#</th><th>Node</th><th>Detail</th><th>ms</th></tr></thead>
+        <tbody id="trace-body"></tbody>
+      </table>
+    </details>
+  </section>
+
+  <script>
+    // ── State ─────────────────────────────────────────────────────────────
+    let conversationId = null;
+    const jobPollers = {};
+
+    function newConversation() {
+      conversationId = null;
+      document.getElementById('conv-badge').textContent = '';
+      document.getElementById('answer-box').style.display = 'none';
+      document.getElementById('error-msg').textContent = '';
+    }
+
+    // ── Upload ────────────────────────────────────────────────────────────
+    async function uploadFiles() {
+      const input = document.getElementById('file-input');
+      if (!input.files.length) { showError('Please choose at least one file.'); return; }
+
+      const btn = document.getElementById('upload-btn');
+      btn.disabled = true;
+      btn.textContent = 'Uploading…';
+
+      const form = new FormData();
+      for (const f of input.files) form.append('files', f);
+
+      try {
+        const res = await fetch('/documents', { method: 'POST', body: form });
+        const data = await res.json();
+        for (const job of data.jobs) {
+          addFileItem(job.job_id, job.filename, 'processing');
+          pollJob(job.job_id);
+        }
+        input.value = '';
+      } catch (e) {
+        showError('Upload failed: ' + e);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Upload';
+      }
+    }
+
+    async function ingestUrl() {
+      const url = document.getElementById('url-input').value.trim();
+      if (!url) { showError('Please enter a URL.'); return; }
+      const res = await fetch('/documents/url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url }),
+      });
+      const data = await res.json();
+      addFileItem(data.job_id, url, 'processing');
+      pollJob(data.job_id);
+      document.getElementById('url-input').value = '';
+    }
+
+    function addFileItem(jobId, filename, status) {
+      const list = document.getElementById('file-list');
+      const div = document.createElement('div');
+      div.className = 'file-item';
+      div.id = 'job-' + jobId;
+      div.innerHTML = `<span class="status-icon" id="icon-${jobId}">⟳</span><span>${filename}</span><span id="chunks-${jobId}" style="color:#888;font-size:0.8rem"></span>`;
+      list.appendChild(div);
+    }
+
+    function pollJob(jobId) {
+      if (jobPollers[jobId]) return;
+      jobPollers[jobId] = setInterval(async () => {
+        const res = await fetch('/documents/' + jobId);
+        const data = await res.json();
+        const icon = document.getElementById('icon-' + jobId);
+        const chunks = document.getElementById('chunks-' + jobId);
+        if (data.status === 'done') {
+          if (icon) icon.textContent = '✓';
+          if (chunks) chunks.textContent = `(${data.chunks} chunks)`;
+          clearInterval(jobPollers[jobId]);
+        } else if (data.status === 'failed') {
+          if (icon) icon.textContent = '✗';
+          if (chunks) chunks.textContent = data.error || 'failed';
+          clearInterval(jobPollers[jobId]);
+        } else if (data.status === 'duplicate') {
+          if (icon) icon.textContent = '≡';
+          if (chunks) chunks.textContent = '(duplicate, already indexed)';
+          clearInterval(jobPollers[jobId]);
+        }
+      }, 1500);
+    }
+
+    // ── Ask ───────────────────────────────────────────────────────────────
+    async function askQuestion() {
+      const q = document.getElementById('question-input').value.trim();
+      if (!q) { showError('Please enter a question.'); return; }
+      clearError();
+
+      const btn = document.getElementById('ask-btn');
+      btn.disabled = true;
+      btn.textContent = 'Thinking…';
+
+      const includeTrace = document.getElementById('show-trace').checked;
+      const body = { question: q, include_trace: includeTrace };
+      if (conversationId) body.conversation_id = conversationId;
+
+      try {
+        const res = await fetch('/ask', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.detail || res.statusText);
+        }
+        const data = await res.json();
+        conversationId = data.conversation_id;
+        document.getElementById('conv-badge').textContent = 'conv: ' + conversationId.slice(0, 8) + '…';
+        renderAnswer(data);
+      } catch (e) {
+        showError('Error: ' + e.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Ask';
+      }
+    }
+
+    function renderAnswer(data) {
+      document.getElementById('answer-box').style.display = 'block';
+      document.getElementById('answer-text').textContent = data.answer;
+
+      document.getElementById('route-badge').textContent = data.route;
+      document.getElementById('conf-badge').textContent = 'confidence: ' + data.confidence;
+      document.getElementById('web-badge').style.display = data.used_web_search ? 'inline' : 'none';
+      document.getElementById('latency-label').textContent = data.latency_ms + ' ms';
+
+      // Citations
+      const ol = document.getElementById('citations-list');
+      ol.innerHTML = '';
+      for (const c of data.citations) {
+        const li = document.createElement('li');
+        const pageStr = c.page ? ` p.${c.page}` : '';
+        li.innerHTML = `<strong>[${c.id}]</strong> ${c.source}${pageStr} — "${c.snippet}" <em>(${c.origin})</em>`;
+        ol.appendChild(li);
+      }
+
+      // Trace
+      const tbody = document.getElementById('trace-body');
+      tbody.innerHTML = '';
+      if (data.trace && data.trace.length) {
+        for (const s of data.trace) {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td>${s.step}</td><td><strong>${s.node}</strong></td><td>${s.detail}</td><td>${s.ms}</td>`;
+          tbody.appendChild(tr);
+        }
+        document.getElementById('trace-summary').textContent =
+          `▸ Reasoning trace (${data.trace.length} steps, ${(data.latency_ms/1000).toFixed(1)}s)`;
+        document.getElementById('trace-details').style.display = 'block';
+      } else {
+        document.getElementById('trace-details').style.display = 'none';
+      }
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────
+    function showError(msg) {
+      document.getElementById('error-msg').textContent = msg;
+    }
+    function clearError() {
+      document.getElementById('error-msg').textContent = '';
+    }
+
+    // Upload status overrides: Fetch does not expose byte-level upload progress,
+    // so the server reports the meaningful ingestion/indexing progress instead.
+    async function uploadFiles() {
+      const input = document.getElementById('file-input');
+      if (!input.files.length) { showError('Please choose at least one file.'); return; }
+      clearError();
+      const btn = document.getElementById('upload-btn');
+      btn.disabled = true;
+      btn.textContent = 'Uploading...';
+      const form = new FormData();
+      for (const file of input.files) form.append('files', file);
+      try {
+        const res = await fetch('/documents', { method: 'POST', body: form });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `Upload request failed (${res.status})`);
+        for (const job of data.jobs || []) {
+          addProgressItem(job.job_id, job.filename);
+          pollJob(job.job_id);
+        }
+        input.value = '';
+      } catch (error) {
+        showError('Upload failed: ' + error.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Upload';
+      }
+    }
+
+    async function ingestUrl() {
+      const url = document.getElementById('url-input').value.trim();
+      if (!url) { showError('Please enter a URL.'); return; }
+      clearError();
+      try {
+        const res = await fetch('/documents/url', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `URL ingestion failed (${res.status})`);
+        addProgressItem(data.job_id, url);
+        pollJob(data.job_id);
+        document.getElementById('url-input').value = '';
+      } catch (error) {
+        showError('URL ingestion failed: ' + error.message);
+      }
+    }
+
+    function addProgressItem(jobId, filename) {
+      const item = document.createElement('div');
+      item.className = 'file-item';
+      item.id = 'job-' + jobId;
+      const icon = document.createElement('span');
+      icon.className = 'status-icon'; icon.id = 'icon-' + jobId; icon.textContent = '...';
+      const name = document.createElement('span'); name.textContent = filename;
+      const detail = document.createElement('span');
+      detail.className = 'upload-detail'; detail.id = 'detail-' + jobId; detail.textContent = 'Queued (0%)';
+      const track = document.createElement('div'); track.className = 'progress-track';
+      const bar = document.createElement('div'); bar.className = 'progress-bar'; bar.id = 'progress-' + jobId;
+      track.appendChild(bar); item.append(icon, name, detail, track);
+      document.getElementById('file-list').appendChild(item);
+    }
+
+    function updateJobItem(jobId, status, progress, detail) {
+      const item = document.getElementById('job-' + jobId);
+      const bar = document.getElementById('progress-' + jobId);
+      const detailEl = document.getElementById('detail-' + jobId);
+      if (item) item.classList.toggle('failed', status === 'failed');
+      if (bar) bar.style.width = `${Math.max(0, Math.min(100, progress))}%`;
+      if (detailEl) detailEl.textContent = detail;
+    }
+
+    function pollJob(jobId) {
+      if (jobPollers[jobId]) return;
+      jobPollers[jobId] = setInterval(async () => {
+        try {
+          const res = await fetch('/documents/' + jobId);
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.detail || `Status request failed (${res.status})`);
+          const progress = data.progress || 0;
+          const chunkInfo = data.chunks ? ` - ${data.chunks_indexed || 0}/${data.chunks} chunks indexed` : '';
+          const detail = `${data.stage || 'processing'} (${progress}%)${chunkInfo}`;
+          updateJobItem(jobId, data.status, progress, detail);
+          const icon = document.getElementById('icon-' + jobId);
+          if (data.status === 'done') {
+            if (icon) icon.textContent = 'OK';
+          } else if (data.status === 'duplicate') {
+            if (icon) icon.textContent = '=';
+            updateJobItem(jobId, data.status, 100, 'Already indexed (duplicate file)');
+          } else if (data.status === 'failed') {
+            if (icon) icon.textContent = 'X';
+            updateJobItem(jobId, data.status, progress, `Failed: ${data.error || 'Unknown error'}`);
+          } else {
+            return;
+          }
+          clearInterval(jobPollers[jobId]);
+          delete jobPollers[jobId];
+        } catch (error) {
+          updateJobItem(jobId, 'failed', 100, 'Could not read upload status: ' + error.message);
+          const icon = document.getElementById('icon-' + jobId);
+          if (icon) icon.textContent = 'X';
+          clearInterval(jobPollers[jobId]);
+          delete jobPollers[jobId];
+        }
+      }, 1000);
+    }
+
+    // Allow Ctrl+Enter to submit
+    document.getElementById('question-input').addEventListener('keydown', e => {
+      if (e.key === 'Enter' && e.ctrlKey) askQuestion();
+    });
+  </script>
+</body>
+</html>
