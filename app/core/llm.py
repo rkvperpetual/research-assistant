@@ -11,7 +11,8 @@ langchain-openai with a custom base_url.
 from __future__ import annotations
 
 import httpx
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import OpenAIEmbeddings
 
 from app.config import get_settings
 
@@ -22,25 +23,20 @@ _http_client = httpx.Client(timeout=120)
 
 # ─── LLM ─────────────────────────────────────────────────────────────────────
 
-def get_llm(temperature: float = 0.0, streaming: bool = False) -> ChatOpenAI:
+def get_llm(temperature: float = 0.0, streaming: bool = False) -> ChatGoogleGenerativeAI:
     """
-    Return a ChatOpenAI instance pointed at OpenRouter with NVIDIA Nemotron.
+    Return a ChatGoogleGenerativeAI instance pointed at Google's Gemini API.
     temperature=0.0 for structured / grading calls; higher for synthesis.
     """
-    return ChatOpenAI(
+    return ChatGoogleGenerativeAI(
         model=_cfg.llm_model,
-        openai_api_key=_cfg.openrouter_api_key,
-        openai_api_base=_cfg.openrouter_base_url,
+        google_api_key=_cfg.google_api_key,
         temperature=temperature,
         streaming=streaming,
-        default_headers={
-            "HTTP-Referer": "https://github.com/autom8ai/research-assistant",
-            "X-Title": "Autom8AI Research Assistant",
-        },
     )
 
 
-def get_synthesis_llm() -> ChatOpenAI:
+def get_synthesis_llm() -> ChatGoogleGenerativeAI:
     """Slightly warmer LLM for answer synthesis."""
     return get_llm(temperature=0.2)
 

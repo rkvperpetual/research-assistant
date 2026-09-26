@@ -43,11 +43,26 @@ _RELEVANCE_STOP_WORDS = {
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
+def _extract_text(msg) -> str:
+    """Safely extract text from AIMessage, handling providers that return lists."""
+    content = msg.content
+    if isinstance(content, list):
+        parts = []
+        for p in content:
+            if isinstance(p, dict) and "text" in p:
+                parts.append(p["text"])
+            elif isinstance(p, str):
+                parts.append(p)
+        return "".join(parts).strip()
+    return str(content).strip()
+
+
 def _llm_json(system: str, user: str) -> dict:
     """Call the LLM expecting JSON output. Parse and return the dict."""
     llm = get_llm(temperature=0.0)
     msgs = [SystemMessage(content=system), HumanMessage(content=user)]
-    raw = llm.invoke(msgs).content
+    msg = llm.invoke(msgs)
+    raw = _extract_text(msg)
     # Strip markdown code fences if present
     raw = raw.strip()
     if raw.startswith("```"):
@@ -86,9 +101,10 @@ def contextualize(state: ResearchState) -> dict:
         prompt = f"Conversation history:\n{history_str}\n\nFollow-up question: {question}"
         try:
             llm = get_llm(temperature=0.0)
-            sq = llm.invoke(
+            msg = llm.invoke(
                 [SystemMessage(content=CONTEXTUALISE_SYSTEM), HumanMessage(content=prompt)]
-            ).content.strip()
+            )
+            sq = _extract_text(msg)
             detail = f"Rewrote to: {sq[:80]}…"
         except Exception as e:
             log.warning("Contextualization failed; using follow-up as-is: %s", e)
@@ -121,9 +137,10 @@ def clarify(state: ResearchState) -> dict:
     t = time.perf_counter()
     sq = state["standalone_question"]
     llm = get_synthesis_llm()
-    raw = llm.invoke(
+    msg = llm.invoke(
         [SystemMessage(content=CLARIFY_SYSTEM), HumanMessage(content=sq)]
-    ).content
+    )
+    raw = _extract_text(msg)
 
     if "---CLARIFICATION---" in raw:
         clarifying_q, best_effort = raw.split("---CLARIFICATION---", 1)
@@ -218,11 +235,19 @@ def grade_documents(state: ResearchState) -> dict:
         )
         return {"graded_relevant": False, "trace": [step]}
 
-    # OPTIMIZATION: Skip the LLM-based grading call which takes too long.
-    # If the vector search found chunks that share lexical terms with the query,
-    # we trust the retriever and proceed directly to synthesis.
-    relevant = True
-    reason = "Lexical overlap verified (fast path)"
+    evidence_text = "\n\n".join(
+        f"[{i+1}] {e['text'][:400]}" for i, e in enumerate(current_evidence)
+    )
+    prompt = f"Question: {query}\n\nRetrieved chunks:\n{evidence_text}"
+
+    try:
+        result = _llm_json(GRADE_SYSTEM, prompt)
+        relevant = bool(result.get("relevant", False))
+        reason = result.get("reason", "")
+    except Exception as e:
+        log.warning("Grading failed: %s", e)
+        relevant = True  # fail open
+        reason = "grading error — defaulting to relevant"
 
     relevant_count = len(current_evidence) if relevant else 0
     step = make_trace_step(
@@ -242,9 +267,10 @@ def transform_query(state: ResearchState) -> dict:
 
     try:
         llm = get_llm(temperature=0.3)
-        new_query = llm.invoke(
+        msg = llm.invoke(
             [SystemMessage(content=TRANSFORM_SYSTEM), HumanMessage(content=query)]
-        ).content.strip()
+        )
+        new_query = _extract_text(msg)
     except Exception as e:
         log.warning("Query rewrite failed; retrying the original query: %s", e)
         new_query = query
@@ -276,19 +302,28 @@ def web_search(state: ResearchState) -> dict:
 
     web_evidence: List[Evidence] = []
     try:
-        from langchain_tavily import TavilySearchAPIRetriever  # type: ignore
-
-        retriever = TavilySearchAPIRetriever(k=4, api_key=_cfg.tavily_api_key)
-        results = retriever.invoke(query)
-        for doc in results:
-            meta = doc.metadata or {}
+        import httpx
+        resp = httpx.post(
+            "https://api.tavily.com/search",
+            json={
+                "query": query,
+                "api_key": _cfg.tavily_api_key,
+                "search_depth": "basic",
+                "max_results": 4,
+            },
+            timeout=15.0
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        
+        for doc in data.get("results", []):
             web_evidence.append(
                 Evidence(
-                    text=doc.page_content[:800],
-                    source=meta.get("source", meta.get("url", "web")),
+                    text=doc.get("content", "")[:800],
+                    source=doc.get("url", "web"),
                     page=None,
                     chunk_index=None,
-                    score=0.0,
+                    score=doc.get("score", 0.0),
                     origin="web_search",
                     sub_question_index=idx,
                 )
@@ -332,9 +367,10 @@ def synthesize(state: ResearchState) -> dict:
     synthesis_available = True
     try:
         llm = get_synthesis_llm()
-        answer = llm.invoke(
+        msg = llm.invoke(
             [SystemMessage(content=SYNTHESIZE_SYSTEM), HumanMessage(content=prompt)]
-        ).content.strip()
+        )
+        answer = _extract_text(msg)
     except Exception as e:
         log.warning("Synthesis failed: %s", e)
         synthesis_available = False
@@ -370,16 +406,36 @@ def verify(state: ResearchState) -> dict:
     evidence_block = "\n\n".join(
         f"[{i+1}] {e['text'][:400]}" for i, e in enumerate(all_evidence)
     )
-    # OPTIMIZATION: Skip the LLM-based groundedness check.
-    # Synthesis usually follows the provided evidence due to the system prompt.
-    # This saves ~10-40 seconds of generation time.
-    grounded = True
-    unsupported = []
+    prompt = f"Draft answer:\n{draft}\n\nEvidence:\n{evidence_block}"
+    try:
+        result = _llm_json(VERIFY_SYSTEM, prompt)
+        grounded = bool(result.get("grounded", True))
+        unsupported = result.get("unsupported_claims", [])
+    except Exception as e:
+        log.warning("Verify parsing failed: %s", e)
+        grounded = True
+        unsupported = []
 
     step = make_trace_step(
         _step_num(state), "verify",
-        "Groundedness check bypassed for speed", t
+        f"grounded={grounded}" + (f"; unsupported: {unsupported[:2]}" if not grounded else ""), t
     )
+
+    if not grounded and unsupported:
+        # One repair attempt
+        llm = get_synthesis_llm()
+        repair_prompt = (
+            f"Draft answer:\n{draft}\n\n"
+            f"Unsupported claims to remove/flag: {json.dumps(unsupported)}\n\n"
+            f"Evidence:\n{evidence_block}\n\n"
+            "Rewrite the answer:"
+        )
+        repaired_msg = llm.invoke(
+            [SystemMessage(content=REPAIR_SYSTEM), HumanMessage(content=repair_prompt)]
+        )
+        repaired = _extract_text(repaired_msg)
+        return {"draft_answer": repaired, "grounded": False, "trace": [step]}
+
     return {"grounded": grounded, "trace": [step]}
 
 

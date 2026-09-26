@@ -13,10 +13,12 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # ── OpenRouter ──────────────────────────────────────────────────────────
+    # ── Google Gemini (LLM) ─────────────────────────────────────────────────
+    google_api_key: str = ""
+    llm_model: str = "gemini-1.5-flash"
+
+    # ── OpenRouter (Embeddings) ─────────────────────────────────────────────
     openrouter_api_key: str = ""
-    # NVIDIA Nemotron via OpenRouter
-    llm_model: str = "nvidia/nemotron-3-ultra-550b-a55b:free"
     # NVIDIA embedding via OpenRouter
     embedding_model: str = "nvidia/nemotron-3-embed-1b:free"
     # OpenRouter base URL
